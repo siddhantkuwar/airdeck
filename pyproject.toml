@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airdeck"
+version = "0.1.0"
+description = "macOS-first webcam gesture controller prototype"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+camera = ["opencv-python>=4.9,<4.12", "mediapipe==0.10.21"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+airdeck = "airdeck.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
