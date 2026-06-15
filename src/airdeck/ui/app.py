@@ -7,6 +7,8 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from airdeck.budget.counters import BudgetCounters
+from airdeck.budget.limiter import BudgetLimiter, BudgetLimits
 from airdeck.camera.frame_queue import LatestFrameQueue
 from airdeck.camera.gesture_feedback import (
     GESTURE_LABELS,
@@ -21,7 +23,9 @@ from airdeck.camera.preview import (
 )
 from airdeck.camera.producer import CaptureFactory, CaptureProducer
 from airdeck.config import Settings
+from airdeck.gestures.state_machine import GestureStateMachine
 from airdeck.lifecycle.shutdown import ShutdownManager
+from airdeck.overshoot.schemas import GestureInference
 
 
 BG = "#F7F6F2"
@@ -234,6 +238,28 @@ def drop_pressure(drops_per_second: float, target_fps: float) -> float:
     return clamp01(drops_per_second / max(target_fps * 4.0, 1.0))
 
 
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    return f"{minutes:02d}:{remaining_seconds:02d}"
+
+
+def _feedback_to_inference(feedback: GestureFeedback) -> GestureInference:
+    gesture = feedback.gesture if feedback.gesture != "HAND_TRACKED" else "UNCERTAIN"
+    if gesture == "NO_GESTURE":
+        hand_visible = False
+    else:
+        hand_visible = feedback.hand_visible
+    return GestureInference(
+        gesture=gesture,
+        confidence=feedback.confidence,
+        hand_visible=hand_visible,
+        description=feedback.description,
+        epoch=0,
+        latency_ms=0.0,
+    )
+
+
 class AirDeckApp:
     def __init__(
         self,
@@ -250,6 +276,16 @@ class AirDeckApp:
         self._frame_queue = LatestFrameQueue()
         self._producer: CaptureProducer | None = None
         self._gesture_analyzer = LocalGestureFeedbackAnalyzer()
+        self._gesture_state = GestureStateMachine()
+        self._budget_counters = BudgetCounters(started_at_monotonic=time.monotonic())
+        self._budget_limiter = BudgetLimiter(
+            BudgetLimits(
+                max_completion_requests=settings.max_completion_requests,
+                max_session_minutes=settings.max_session_minutes,
+                max_requests_per_minute=settings.max_requests_per_minute,
+                max_inference_hz=settings.max_inference_hz,
+            )
+        )
         self._last_preview_frame_index: int | None = None
         self._preview_photo: tk.PhotoImage | None = None
         self._closed = False
@@ -285,6 +321,13 @@ class AirDeckApp:
         self.box_var = tk.StringVar(value="no hand box")
         self.event_var = tk.StringVar(value="Ready")
         self.telemetry_summary_var = tk.StringVar(value="idle · 0.0 fps · 0% confidence")
+        self.overshoot_var = tk.StringVar(value="overshoot offline")
+        self.latency_var = tk.StringVar(value="0 ms")
+        self.requests_var = tk.StringVar(value="0")
+        self.budget_var = tk.StringVar(value="OK")
+        self.session_timer_var = tk.StringVar(value="00:00")
+        self.candidate_var = tk.StringVar(value="0 / 2")
+        self.command_var = tk.StringVar(value="none")
         self.emergency_disabled = False
         self.start_button: ActionButton | None = None
         self.stop_button: ActionButton | None = None
@@ -306,6 +349,8 @@ class AirDeckApp:
 
         self._frame_queue = LatestFrameQueue()
         self._gesture_analyzer = LocalGestureFeedbackAnalyzer()
+        self._gesture_state = GestureStateMachine()
+        self._budget_counters.start_stream(time.monotonic())
         self._last_preview_frame_index = None
         self._last_metric_time = time.monotonic()
         self._last_frame_count = 0
@@ -330,14 +375,17 @@ class AirDeckApp:
             return
         self.listening_var.set("enabled")
         self._set_status("streaming")
+        self.overshoot_var.set("demo-local")
         self._log_event("Camera streaming")
         self._update_controls()
         self._logger.info("session_started camera_index=%s", self.settings.camera_index)
 
     def stop_session(self) -> None:
         self._stop_capture()
+        self._budget_counters.stop_stream(time.monotonic())
         self.listening_var.set("disabled")
         self._set_status("camera off")
+        self.overshoot_var.set("offline")
         self._log_event("Camera stopped")
         self._update_controls()
         self._logger.info("session_stopped")
@@ -346,7 +394,9 @@ class AirDeckApp:
         self.emergency_disabled = True
         self.listening_var.set("disabled")
         self._stop_capture()
+        self._budget_counters.stop_stream(time.monotonic())
         self._set_status("disabled")
+        self.overshoot_var.set("disabled")
         self._apply_gesture_feedback(
             GestureFeedback(
                 gesture="NO_GESTURE",
@@ -523,10 +573,14 @@ class AirDeckApp:
         metrics.columnconfigure((0, 1), weight=1)
         self._metric(metrics, "fps", self.fps_var, 0, 0)
         self._metric(metrics, "confidence", self.confidence_var, 0, 1)
-        self._metric(metrics, "hand area", self.area_var, 1, 0)
-        self._metric(metrics, "drops/sec", self.drops_var, 1, 1)
-        self._metric(metrics, "frames", self.frames_var, 2, 0)
-        self._metric(metrics, "queue", self.queue_var, 2, 1)
+        self._metric(metrics, "latency", self.latency_var, 1, 0)
+        self._metric(metrics, "requests", self.requests_var, 1, 1)
+        self._metric(metrics, "candidate", self.candidate_var, 2, 0)
+        self._metric(metrics, "budget", self.budget_var, 2, 1)
+        self._metric(metrics, "session", self.session_timer_var, 3, 0)
+        self._metric(metrics, "queue", self.queue_var, 3, 1)
+        self._metric(metrics, "overshoot", self.overshoot_var, 4, 0)
+        self._metric(metrics, "command", self.command_var, 4, 1)
 
         graph = tk.Frame(shell, bg=SURFACE, highlightthickness=1, highlightbackground=LINE)
         graph.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(24, 0))
@@ -610,9 +664,17 @@ class AirDeckApp:
         self.frames_var.set(str(metrics.frames_received))
         self.drops_var.set(f"{drops_per_second:.1f}")
         self.queue_var.set(f"{metrics.qsize} / {self._frame_queue.maxsize}")
+        snapshot = self._budget_counters.snapshot(
+            now=now,
+            max_completion_requests=self.settings.max_completion_requests,
+        )
+        budget_decision = self._budget_limiter.can_request(self._budget_counters, now=now)
+        self.requests_var.set(str(snapshot.total_completion_requests))
+        self.budget_var.set(budget_decision.status)
+        self.session_timer_var.set(_format_duration(snapshot.session_seconds))
         self.telemetry_summary_var.set(
             f"{fps:.1f} fps · {round(feedback.confidence * 100)}% confidence · "
-            f"{drops_per_second:.1f} stale drops/sec"
+            f"{drops_per_second:.1f} stale drops/sec · {snapshot.total_completion_requests} requests"
         )
 
     def _update_preview(self) -> None:
@@ -649,6 +711,15 @@ class AirDeckApp:
             self.box_var.set(f"{box.width} x {box.height} at {box.x}, {box.y}")
         else:
             self.box_var.set("no hand box")
+
+        decision = self._gesture_state.observe(_feedback_to_inference(feedback), now=time.monotonic())
+        self.candidate_var.set(f"{decision.confirmation_count} / 2")
+        self.listening_var.set("enabled" if decision.listening_enabled else "disabled")
+        if decision.accepted and decision.command is not None:
+            self.command_var.set(decision.command.label)
+            self._log_event(f"{decision.command.label} accepted")
+        elif decision.reason not in {"neutral gesture", "awaiting confirmation"}:
+            self.command_var.set(decision.reason)
 
         active = feedback.gesture
         for gesture, row in self._gesture_rows.items():

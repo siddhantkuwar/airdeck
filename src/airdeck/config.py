@@ -15,7 +15,11 @@ class Settings:
     demo_mode: bool = True
     max_completion_requests: int = 80
     max_session_minutes: int = 5
+    max_requests_per_minute: int = 60
+    max_inference_hz: float = 2.0
     default_inference_hz: float = 0.75
+    publisher_fps: float = 18.0
+    keepalive_interval_seconds: float = 20.0
     camera_index: int = 0
     target_camera_fps: float = 30.0
     log_level: str = "INFO"
@@ -53,8 +57,22 @@ def load_settings(
             default_session_minutes,
             "AIRDECK_MAX_SESSION_MINUTES",
         ),
+        max_requests_per_minute=_int_value(
+            values.get("AIRDECK_MAX_REQUESTS_PER_MINUTE"),
+            60,
+            "AIRDECK_MAX_REQUESTS_PER_MINUTE",
+        ),
+        max_inference_hz=_float_value(
+            values.get("AIRDECK_MAX_INFERENCE_HZ"), 2.0, "AIRDECK_MAX_INFERENCE_HZ"
+        ),
         default_inference_hz=_float_value(
             values.get("AIRDECK_INFERENCE_HZ"), 0.75, "AIRDECK_INFERENCE_HZ"
+        ),
+        publisher_fps=_float_value(values.get("AIRDECK_PUBLISHER_FPS"), 18.0, "AIRDECK_PUBLISHER_FPS"),
+        keepalive_interval_seconds=_float_value(
+            values.get("AIRDECK_KEEPALIVE_SECONDS"),
+            20.0,
+            "AIRDECK_KEEPALIVE_SECONDS",
         ),
         camera_index=_int_value(values.get("AIRDECK_CAMERA_INDEX"), 0, "AIRDECK_CAMERA_INDEX"),
         target_camera_fps=_float_value(
