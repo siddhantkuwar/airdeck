@@ -24,6 +24,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.deleted: list[str] = []
         self.completions: list[dict[str, Any]] = []
+        self.keepalives = 0
 
     def list_models(self) -> dict[str, Any]:
         return {"data": [{"id": "model-ready", "status": "ready"}]}
@@ -32,8 +33,10 @@ class FakeClient:
         return dict(STREAM_PAYLOAD)
 
     def keepalive_stream(self, stream_id: str) -> dict[str, Any]:
+        self.keepalives += 1
         payload = dict(STREAM_PAYLOAD)
         payload["id"] = stream_id
+        payload["publish"] = {"type": "livekit", "url": "wss://room", "token": "token-2"}
         return payload
 
     def delete_stream(self, stream_id: str) -> dict[str, Any]:
@@ -78,6 +81,41 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(client.completions[0]["messages"][0]["content"][1]["image_url"]["url"], "ovs://streams/stream-1?frame_index=-1")
         self.assertEqual(client.deleted, ["stream-1"])
         self.assertFalse(sinks[0].connected)
+
+    def test_renewal_restarts_publisher_when_publish_token_changes(self) -> None:
+        now = 0.0
+        client = FakeClient()
+        frame_queue = LatestFrameQueue()
+        settings = Settings(
+            overshoot_api_key="ovs-test",
+            publisher_fps=18.0,
+            keepalive_interval_seconds=1.0,
+        )
+        sinks: list[NoopFrameSink] = []
+
+        def sink_factory(_session: StreamSession) -> NoopFrameSink:
+            sink = NoopFrameSink()
+            sinks.append(sink)
+            return sink
+
+        runtime = OvershootRuntime(
+            settings,
+            frame_queue,
+            client=client,
+            sink_factory=sink_factory,
+            clock=lambda: now,
+        )
+        runtime.start()
+        time.sleep(0.05)
+        now = 2.0
+        runtime.renew_if_due()
+        time.sleep(0.05)
+        runtime.stop()
+
+        self.assertEqual(client.keepalives, 1)
+        self.assertEqual(len(sinks), 2)
+        self.assertFalse(sinks[0].connected)
+        self.assertFalse(sinks[1].connected)
 
 
 if __name__ == "__main__":

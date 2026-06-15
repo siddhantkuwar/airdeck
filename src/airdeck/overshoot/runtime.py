@@ -94,7 +94,12 @@ class OvershootRuntime:
         return session
 
     def renew_if_due(self) -> None:
-        self._stream_manager.renew_if_due()
+        before = self._stream_manager.session
+        after = self._stream_manager.renew_if_due()
+        if before is None or after is None:
+            return
+        if before.stream.publish.token != after.stream.publish.token:
+            self._restart_publisher(after)
 
     def infer_once(self) -> InferenceResult | None:
         session = self._stream_manager.session
@@ -108,12 +113,25 @@ class OvershootRuntime:
 
     def stop(self) -> None:
         self._scheduler.shutdown()
+        self._stop_publisher()
+        self._counters.stop_stream(self._clock())
+        self._stream_manager.stop()
+
+    def _restart_publisher(self, session: StreamSession) -> None:
+        self._stop_publisher()
+        self._publisher = OvershootPublisher(
+            self._frame_queue,
+            self._sink_factory(session),
+            target_fps=self._settings.publisher_fps,
+            logger=self._logger,
+        )
+        self._publisher.start()
+
+    def _stop_publisher(self) -> None:
         if self._publisher is not None:
             self._publisher.stop()
             self._publisher.join(timeout=2.0)
             self._publisher = None
-        self._counters.stop_stream(self._clock())
-        self._stream_manager.stop()
 
     def status(self) -> RuntimeStatus:
         session = self._stream_manager.session
