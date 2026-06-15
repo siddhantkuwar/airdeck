@@ -58,6 +58,7 @@ class LoadSettingsTests(unittest.TestCase):
                 "AIRDECK_MAX_INFERENCE_HZ": "1.5",
                 "AIRDECK_PUBLISHER_FPS": "15",
                 "AIRDECK_KEEPALIVE_SECONDS": "12",
+                "AIRDECK_OVERSHOOT_LIVE": "true",
             },
         )
 
@@ -65,6 +66,7 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_inference_hz, 1.5)
         self.assertEqual(settings.publisher_fps, 15)
         self.assertEqual(settings.keepalive_interval_seconds, 12)
+        self.assertTrue(settings.overshoot_live)
 
 
 if __name__ == "__main__":

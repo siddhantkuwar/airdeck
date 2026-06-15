@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from airdeck.camera.frame_queue import LatestFrameQueue
-from airdeck.overshoot.publisher import NoopFrameSink, OvershootPublisher
+from airdeck.overshoot.publisher import NoopFrameSink, OvershootPublisher, bgr_frame_to_rgb24
 
 
 class PublisherTests(unittest.TestCase):
@@ -25,6 +27,13 @@ class PublisherTests(unittest.TestCase):
     def test_rejects_publisher_rates_above_twenty_fps(self) -> None:
         with self.assertRaises(ValueError):
             OvershootPublisher(LatestFrameQueue(), NoopFrameSink(), target_fps=21)
+
+    def test_bgr_frame_to_rgb24_converts_opencv_channel_order(self) -> None:
+        bgr = np.array([[[10, 20, 30]]], dtype=np.uint8)
+
+        rgb = bgr_frame_to_rgb24(bgr)
+
+        self.assertEqual(rgb.tolist(), [[[30, 20, 10]]])
 
 
 if __name__ == "__main__":

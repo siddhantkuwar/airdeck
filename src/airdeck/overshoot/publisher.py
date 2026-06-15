@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import threading
 import time
 from collections.abc import Callable
@@ -44,6 +45,79 @@ class NoopFrameSink:
         self.connected = False
 
 
+class LiveKitFrameSink:
+    def __init__(self, *, url: str, token: str, track_name: str = "airdeck-camera") -> None:
+        self._url = url
+        self._token = token
+        self._track_name = track_name
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._room: Any | None = None
+        self._source: Any | None = None
+        self._track: Any | None = None
+        self._width: int | None = None
+        self._height: int | None = None
+        self.connected = False
+
+    def connect(self) -> None:
+        try:
+            from livekit import rtc  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise RuntimeError("Install the 'overshoot' extra to publish with LiveKit") from exc
+
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._room = rtc.Room(loop=self._loop)
+        self._loop.run_until_complete(self._room.connect(self._url, self._token))
+        self.connected = True
+
+    def publish(self, frame: Any, *, frame_index: int, timestamp_monotonic: float) -> None:
+        _ = frame_index
+        if not self.connected or self._loop is None or self._room is None:
+            raise RuntimeError("LiveKit sink is not connected")
+        rgb_frame = bgr_frame_to_rgb24(frame)
+        height, width = rgb_frame.shape[:2]
+        if self._source is None or self._width != width or self._height != height:
+            self._create_track(width=width, height=height)
+
+        from livekit import rtc  # type: ignore[import-not-found]
+
+        video_frame = rtc.VideoFrame(
+            width,
+            height,
+            rtc.VideoBufferType.RGB24,
+            memoryview(rgb_frame).tobytes(),
+        )
+        timestamp_us = int(timestamp_monotonic * 1_000_000)
+        self._source.capture_frame(video_frame, timestamp_us=timestamp_us)
+
+    def close(self) -> None:
+        if self._loop is None:
+            return
+        try:
+            if self._room is not None:
+                self._loop.run_until_complete(self._room.disconnect())
+        finally:
+            self._loop.close()
+            self._loop = None
+            self._room = None
+            self._source = None
+            self._track = None
+            self.connected = False
+
+    def _create_track(self, *, width: int, height: int) -> None:
+        if self._room is None or self._loop is None:
+            raise RuntimeError("LiveKit room is not connected")
+        from livekit import rtc  # type: ignore[import-not-found]
+
+        self._source = rtc.VideoSource(width, height)
+        self._track = rtc.LocalVideoTrack.create_video_track(self._track_name, self._source)
+        options = rtc.TrackPublishOptions()
+        options.source = rtc.TrackSource.SOURCE_CAMERA
+        self._loop.run_until_complete(self._room.local_participant.publish_track(self._track, options))
+        self._width = width
+        self._height = height
+
+
 class OvershootPublisher:
     def __init__(
         self,
@@ -81,7 +155,6 @@ class OvershootPublisher:
             return
         self._stop_event.clear()
         self._started_at = self._clock()
-        self._sink.connect()
         self._thread = threading.Thread(target=self._run, name="airdeck-overshoot-publisher", daemon=True)
         self._thread.start()
         self._logger.info("overshoot_publisher_started fps=%s", self._target_fps)
@@ -111,6 +184,7 @@ class OvershootPublisher:
     def _run(self) -> None:
         interval = 1.0 / self._target_fps
         try:
+            self._sink.connect()
             while not self._stop_event.is_set():
                 started = self._clock()
                 self.publish_once()
@@ -156,3 +230,10 @@ def resize_frame_to_480p(frame: Any) -> Any:
     except ImportError:
         return frame
     return cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))))
+
+
+def bgr_frame_to_rgb24(frame: Any) -> Any:
+    shape = getattr(frame, "shape", None)
+    if not shape or len(shape) != 3 or shape[2] < 3:
+        raise ValueError("LiveKit publishing requires a color frame with at least three channels")
+    return frame[:, :, 2::-1].copy()

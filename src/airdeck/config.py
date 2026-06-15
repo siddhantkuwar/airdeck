@@ -20,6 +20,7 @@ class Settings:
     default_inference_hz: float = 0.75
     publisher_fps: float = 18.0
     keepalive_interval_seconds: float = 20.0
+    overshoot_live: bool = False
     camera_index: int = 0
     target_camera_fps: float = 30.0
     log_level: str = "INFO"
@@ -74,6 +75,7 @@ def load_settings(
             20.0,
             "AIRDECK_KEEPALIVE_SECONDS",
         ),
+        overshoot_live=_bool_value(values.get("AIRDECK_OVERSHOOT_LIVE", "false")),
         camera_index=_int_value(values.get("AIRDECK_CAMERA_INDEX"), 0, "AIRDECK_CAMERA_INDEX"),
         target_camera_fps=_float_value(
             values.get("AIRDECK_CAMERA_FPS"), 30.0, "AIRDECK_CAMERA_FPS"

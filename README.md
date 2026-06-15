@@ -12,6 +12,14 @@ The first slice includes local configuration, redacted structured logging, a max
 
 The second slice adds the Overshoot safety layer: model discovery, stream lifecycle helpers, latest-frame inference payloads, strict gesture JSON validation, request/budget guards, a capped 480p publisher loop, and a gesture confirmation state machine.
 
+Install the optional LiveKit publisher dependency when testing against a real Overshoot stream:
+
+```bash
+.venv312/bin/python -m pip install -e '.[camera,overshoot]'
+```
+
+Set `AIRDECK_OVERSHOOT_LIVE=true` only when you want Start to create a real Overshoot stream and consume inference requests. The default remains local demo mode for safe gesture/UI testing.
+
 ```bash
 python3.12 -m venv .venv312
 .venv312/bin/python -m pip install -e '.[camera]'

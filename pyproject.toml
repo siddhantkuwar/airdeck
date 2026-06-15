@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 camera = ["opencv-python>=4.9,<4.12", "mediapipe==0.10.21"]
+overshoot = ["livekit==1.1.10"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]

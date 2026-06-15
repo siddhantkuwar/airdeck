@@ -25,6 +25,7 @@ from airdeck.camera.producer import CaptureFactory, CaptureProducer
 from airdeck.config import Settings
 from airdeck.gestures.state_machine import GestureStateMachine
 from airdeck.lifecycle.shutdown import ShutdownManager
+from airdeck.overshoot.runtime import OvershootRuntime
 from airdeck.overshoot.schemas import GestureInference
 
 
@@ -275,6 +276,7 @@ class AirDeckApp:
         self._logger = logger or logging.getLogger("airdeck.ui")
         self._frame_queue = LatestFrameQueue()
         self._producer: CaptureProducer | None = None
+        self._overshoot_runtime: OvershootRuntime | None = None
         self._gesture_analyzer = LocalGestureFeedbackAnalyzer()
         self._gesture_state = GestureStateMachine()
         self._budget_counters = BudgetCounters(started_at_monotonic=time.monotonic())
@@ -306,6 +308,7 @@ class AirDeckApp:
         )
 
         self.shutdown_manager = ShutdownManager(logger=self._logger)
+        self.shutdown_manager.register("overshoot_runtime", self._stop_overshoot_runtime, priority=20)
         self.shutdown_manager.register("capture_producer", self._stop_capture, priority=10)
 
         self.status_var = tk.StringVar(value="camera off")
@@ -368,8 +371,10 @@ class AirDeckApp:
         )
         try:
             self._producer.start()
+            self._start_overshoot_runtime()
         except BaseException as exc:  # noqa: BLE001 - surface camera permission/open failures to UI.
-            self._producer = None
+            self._stop_overshoot_runtime()
+            self._stop_capture()
             self._handle_camera_error(exc)
             self._update_controls()
             return
@@ -381,6 +386,7 @@ class AirDeckApp:
         self._logger.info("session_started camera_index=%s", self.settings.camera_index)
 
     def stop_session(self) -> None:
+        self._stop_overshoot_runtime()
         self._stop_capture()
         self._budget_counters.stop_stream(time.monotonic())
         self.listening_var.set("disabled")
@@ -393,6 +399,7 @@ class AirDeckApp:
     def emergency_disable(self) -> None:
         self.emergency_disabled = True
         self.listening_var.set("disabled")
+        self._stop_overshoot_runtime()
         self._stop_capture()
         self._budget_counters.stop_stream(time.monotonic())
         self._set_status("disabled")
@@ -629,6 +636,7 @@ class AirDeckApp:
     def _schedule_tick(self) -> None:
         if self._closed:
             return
+        self._poll_overshoot_runtime()
         self._update_metrics()
         self._update_preview()
         self._draw_stats()
@@ -830,6 +838,44 @@ class AirDeckApp:
         self._producer.stop()
         self._producer.join(timeout=2.0)
         self._producer = None
+
+    def _start_overshoot_runtime(self) -> None:
+        if not self.settings.overshoot_live:
+            return
+        self._set_status("connecting")
+        self.overshoot_var.set("connecting")
+        runtime = OvershootRuntime(
+            self.settings,
+            self._frame_queue,
+            logger=self._logger,
+        )
+        session = runtime.start()
+        self._overshoot_runtime = runtime
+        self.overshoot_var.set("connected")
+        self._log_event(f"Overshoot stream {session.stream.id[:8]} connected")
+
+    def _stop_overshoot_runtime(self) -> None:
+        if self._overshoot_runtime is None:
+            return
+        self._overshoot_runtime.stop()
+        self._overshoot_runtime = None
+        self.overshoot_var.set("offline")
+
+    def _poll_overshoot_runtime(self) -> None:
+        if self._overshoot_runtime is None:
+            return
+        self._overshoot_runtime.renew_if_due()
+        result = self._overshoot_runtime.infer_once()
+        status = self._overshoot_runtime.status()
+        self.overshoot_var.set(status.connection_state)
+        self.requests_var.set(str(status.request_count))
+        if result is None:
+            return
+        self.latency_var.set(f"{round(result.latency_ms)} ms")
+        self.budget_var.set(result.status if result.status != "OK" else "OK")
+        if result.gesture is not None:
+            self.gesture_var.set(result.gesture.gesture.replace("_", " "))
+            self.confidence_var.set(f"{round(result.gesture.confidence * 100)}%")
 
     def _handle_camera_error(self, exc: BaseException) -> None:
         def update() -> None:
